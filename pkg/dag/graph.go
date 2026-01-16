@@ -55,6 +55,9 @@ func (g *Graph[T]) AddNode(node T) error {
 // This establishes that 'child' depends on 'parent', meaning 'parent' must be
 // processed before 'child' in topological order.
 //
+// In the DAG structure, the edge goes FROM child TO parent (child points to its dependency).
+// This ensures post-order DFS produces correct topological ordering.
+//
 // Returns an error if either node doesn't exist or if adding the edge would create a cycle.
 func (g *Graph[T]) AddEdge(parent, child T, verifyFn EdgeFunc) error {
 	g.mu.Lock()
@@ -73,10 +76,15 @@ func (g *Graph[T]) AddEdge(parent, child T, verifyFn EdgeFunc) error {
 		return fmt.Errorf("child node %s not found in graph", childName)
 	}
 
-	// Add the edge (includes cycle detection)
-	if err := parentWrapper.AddChild(childWrapper, verifyFn); err != nil {
+	// Add edge FROM child TO parent (child points to its dependency)
+	// This ensures post-order traversal gives us dependencies before dependents
+	if err := childWrapper.AddChild(parentWrapper, verifyFn); err != nil {
 		return err
 	}
+
+	// Remove parent from root since something now depends on it
+	// (only nodes that nothing depends on should be children of root)
+	delete(g.root.children, parentWrapper)
 
 	return nil
 }
@@ -136,6 +144,8 @@ func (g *Graph[T]) Topology() []T {
 }
 
 // GetChildren returns the direct children of a node (nodes that depend on it).
+// Since edges go FROM dependent TO dependency, we need to find all nodes
+// that have this node as a child in the graph structure.
 func (g *Graph[T]) GetChildren(parent T) ([]T, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -146,15 +156,23 @@ func (g *Graph[T]) GetChildren(parent T) ([]T, error) {
 		return nil, fmt.Errorf("node %s not found in graph", parentName)
 	}
 
-	children := make([]T, 0, len(parentWrapper.children))
-	for childWrapper := range parentWrapper.children {
-		children = append(children, childWrapper.node)
+	// Find all nodes that have parent as a child (i.e., depend on parent)
+	var children []T
+	for _, wrapper := range g.nodeDict {
+		for child := range wrapper.children {
+			if child == parentWrapper {
+				children = append(children, wrapper.node)
+				break
+			}
+		}
 	}
 
 	return children, nil
 }
 
 // GetEdgeFunc returns the verification function for the edge from parent to child.
+// Since edges go FROM dependent TO dependency (child -> parent),
+// we look for the verify function on the edge from child to parent.
 func (g *Graph[T]) GetEdgeFunc(parent, child T) (EdgeFunc, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -172,9 +190,10 @@ func (g *Graph[T]) GetEdgeFunc(parent, child T) (EdgeFunc, error) {
 		return nil, fmt.Errorf("child node %s not found in graph", childName)
 	}
 
-	verifyFn, hasEdge := parentWrapper.children[childWrapper]
+	// Edge goes FROM child TO parent in graph structure
+	verifyFn, hasEdge := childWrapper.children[parentWrapper]
 	if !hasEdge {
-		return nil, fmt.Errorf("no edge from %s to %s", parentName, childName)
+		return nil, fmt.Errorf("no edge from %s to %s", childName, parentName)
 	}
 
 	return verifyFn, nil

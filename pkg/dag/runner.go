@@ -150,6 +150,10 @@ func (r *Runner[T]) scheduler(ctx context.Context, topology []T, work chan<- T, 
 			return
 		case err := <-errs:
 			if isFatalError(err) {
+				// Store the fatal error
+				r.mu.Lock()
+				r.exception = err
+				r.mu.Unlock()
 				cancel()
 				return
 			}
@@ -257,6 +261,15 @@ func (r *Runner[T]) allStartedOrSkipped(topology []T) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	// First check if any nodes are still in progress (started but not finished)
+	for _, node := range topology {
+		name := node.GetName()
+		if r.started[name] && !r.verified[name] && !r.unverified[name] && !r.failed[name] && !r.disabled[name] {
+			return false // Node is still executing, dependencies might become satisfied
+		}
+	}
+
+	// Then check if any unstarted nodes could potentially start
 	for _, node := range topology {
 		name := node.GetName()
 		if !r.started[name] && !r.disabled[name] && !r.failed[name] {
